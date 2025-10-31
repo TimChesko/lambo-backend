@@ -12,7 +12,7 @@ async def cmd_start(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="🚀 Открыть веб-апп",
-            web_app=WebAppInfo(url="https://dev.durak.bot/")
+            web_app=WebAppInfo(url="https://durak.bot/")
         )]
     ])
     

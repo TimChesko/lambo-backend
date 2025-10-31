@@ -101,23 +101,23 @@ db-downgrade:
 
 prod-up:
 	@echo "🚀 Запускаю production окружение..."
-	docker-compose -f docker-compose.prod.yml up -d --build
+	docker compose -f docker-compose.prod.yml up -d --build
 	@echo "✅ Production запущен!"
 	@echo "📝 Логи: make prod-logs"
 	@echo "🛑 Остановить: make prod-down"
 
 prod-down:
-	docker-compose -f docker-compose.prod.yml down
+	docker compose -f docker-compose.prod.yml down
 
 prod-logs:
-	docker-compose -f docker-compose.prod.yml logs -f
+	docker compose -f docker-compose.prod.yml logs -f
 
 prod-restart:
-	docker-compose -f docker-compose.prod.yml restart
+	docker compose -f docker-compose.prod.yml restart
 
 prod-build:
-	docker-compose -f docker-compose.prod.yml build --no-cache
+	docker compose -f docker-compose.prod.yml build --no-cache
 
 prod-status:
-	docker-compose -f docker-compose.prod.yml ps
+	docker compose -f docker-compose.prod.yml ps
 
