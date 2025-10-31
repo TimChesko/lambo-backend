@@ -15,10 +15,17 @@ help:
 	@echo "  make run-worker   - Запустить background worker"
 	@echo "  make run-all      - Запустить все сервисы локально"
 	@echo ""
-	@echo "🐳 Production Docker:"
+	@echo "🐳 Docker (dev):"
 	@echo "  make docker-up    - Запустить все сервисы в Docker"
 	@echo "  make docker-down  - Остановить Docker контейнеры"
 	@echo "  make docker-logs  - Показать логи Docker"
+	@echo ""
+	@echo "🚀 Production:"
+	@echo "  make prod-up      - Запустить production окружение"
+	@echo "  make prod-down    - Остановить production"
+	@echo "  make prod-logs    - Показать production логи"
+	@echo "  make prod-restart - Перезапустить production"
+	@echo "  make prod-build   - Пересобрать production образы"
 	@echo ""
 	@echo "🛠 Утилиты:"
 	@echo "  make format       - Форматировать код"
@@ -91,4 +98,26 @@ db-upgrade:
 
 db-downgrade:
 	alembic downgrade -1
+
+prod-up:
+	@echo "🚀 Запускаю production окружение..."
+	docker-compose -f docker-compose.prod.yml up -d --build
+	@echo "✅ Production запущен!"
+	@echo "📝 Логи: make prod-logs"
+	@echo "🛑 Остановить: make prod-down"
+
+prod-down:
+	docker-compose -f docker-compose.prod.yml down
+
+prod-logs:
+	docker-compose -f docker-compose.prod.yml logs -f
+
+prod-restart:
+	docker-compose -f docker-compose.prod.yml restart
+
+prod-build:
+	docker-compose -f docker-compose.prod.yml build --no-cache
+
+prod-status:
+	docker-compose -f docker-compose.prod.yml ps
 
