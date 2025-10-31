@@ -1,0 +1,128 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ton_tracker
+      POSTGRES_PASSWORD: ton_tracker_password
+      POSTGRES_DB: ton_tracker
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ton_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: watchmedo auto-restart --directory=./src --pattern=*.py --recursive -- python run_api.py
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://ton_tracker:ton_tracker_password@postgres:5432/ton_tracker
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - PUBLIC_URL=${PUBLIC_URL:-https://your-domain.com}
+      - TON_API_URL=https://tonapi.io
+      - TON_API_KEY=${TON_API_KEY:-}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+      - RELOAD=true
+      - JETTON_MASTER=0:c4d623eb3fcd0bd7b473907dd896e5ec11c9f98be6cf15fb9edb9f6e30a28513
+      - REQUESTS_PER_SECOND=1.0
+      - WORKER_BATCH_SIZE=10
+      - START_DATE=2025-10-28
+      - TON_PROOF_DOMAIN=dev.durak.bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: watchmedo auto-restart --directory=./src --pattern=*.py --recursive -- python run_bot.py
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://ton_tracker:ton_tracker_password@postgres:5432/ton_tracker
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - PUBLIC_URL=${PUBLIC_URL:-https://your-domain.com}
+      - TON_API_URL=https://tonapi.io
+      - TON_API_KEY=${TON_API_KEY:-}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+      - JETTON_MASTER=0:c4d623eb3fcd0bd7b473907dd896e5ec11c9f98be6cf15fb9edb9f6e30a28513
+      - REQUESTS_PER_SECOND=1.0
+      - START_DATE=2025-10-28
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: watchmedo auto-restart --directory=./src --pattern=*.py --recursive -- python run_worker.py
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://ton_tracker:ton_tracker_password@postgres:5432/ton_tracker
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - PUBLIC_URL=${PUBLIC_URL:-https://your-domain.com}
+      - TON_API_URL=https://tonapi.io
+      - TON_API_KEY=${TON_API_KEY:-}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+      - JETTON_MASTER=0:c4d623eb3fcd0bd7b473907dd896e5ec11c9f98be6cf15fb9edb9f6e30a28513
+      - REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND:-1.0}
+      - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-10}
+      - START_DATE=${START_DATE:-2025-10-28}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
