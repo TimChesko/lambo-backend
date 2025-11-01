@@ -16,6 +16,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
     restart: always
     logging:
       driver: "json-file"
@@ -35,6 +43,14 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     restart: always
     logging:
       driver: "json-file"
@@ -60,6 +76,14 @@ services:
         condition: service_healthy
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.75'
+          memory: 1.5G
     restart: always
     logging:
       driver: "json-file"
@@ -81,6 +105,14 @@ services:
         condition: service_started
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
     restart: always
     logging:
       driver: "json-file"
@@ -102,6 +134,14 @@ services:
         condition: service_started
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1.5'
+          memory: 3G
     restart: always
     logging:
       driver: "json-file"

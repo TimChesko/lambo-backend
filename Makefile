@@ -4,7 +4,7 @@ help:
 	@echo "Доступные команды:"
 	@echo ""
 	@echo "🚀 Разработка:"
-	@echo "  make dev-up       - Запустить в фоне с hot reload (РЕКОМЕНДУЕТСЯ)"
+	@echo "  make dev-up       - Запустить в фоне с hot reload"
 	@echo "  make dev-down     - Остановить dev окружение"
 	@echo "  make dev-logs     - Показать логи dev окружения"
 	@echo ""
@@ -37,19 +37,19 @@ install:
 
 dev-up:
 	@echo "🚀 Запускаю dev окружение с hot reload..."
-	docker-compose -f docker-compose.dev.yml up -d --build
+	docker compose -f docker-compose.dev.yml up -d --build
 	@echo "✅ Сервисы запущены в фоне!"
 	@echo "📝 Логи: make dev-logs"
 	@echo "🛑 Остановить: make dev-down"
 
 dev-down:
-	docker-compose -f docker-compose.dev.yml down
+	docker compose -f docker-compose.dev.yml down
 
 dev-logs:
-	docker-compose -f docker-compose.dev.yml logs -f
+	docker compose -f docker-compose.dev.yml logs -f
 
 dev-restart:
-	docker-compose -f docker-compose.dev.yml restart
+	docker compose -f docker-compose.dev.yml restart
 
 run-api:
 	python run_api.py
@@ -69,16 +69,16 @@ run-all:
 		wait)
 
 docker-up:
-	docker-compose up -d
+	docker compose up -d
 
 docker-down:
-	docker-compose down
+	docker compose down
 
 docker-logs:
-	docker-compose logs -f
+	docker compose logs -f
 
 docker-rebuild:
-	docker-compose up -d --build
+	docker compose up -d --build
 
 format:
 	black src/

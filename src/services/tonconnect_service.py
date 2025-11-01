@@ -35,26 +35,6 @@ class TONConnectService:
             )
         return self.connectors[user_id]
     
-    async def get_connect_url(self, user_id: int) -> str:
-        """Получить URL для подключения кошелька"""
-        connector = self.get_connector(user_id)
-        
-        wallets_list = connector.get_wallets()
-        
-        # Генерируем универсальный URL для всех кошельков
-        connect_url = await connector.connect(wallets_list)
-        
-        return connect_url
-    
-    async def get_wallet_address(self, user_id: int) -> Optional[str]:
-        """Получить адрес подключенного кошелька"""
-        connector = self.get_connector(user_id)
-        
-        if connector.connected:
-            return connector.account.address
-        
-        return None
-    
     async def disconnect(self, user_id: int):
         """Отключить кошелек"""
         connector = self.get_connector(user_id)
@@ -62,11 +42,6 @@ class TONConnectService:
         
         if user_id in self.connectors:
             del self.connectors[user_id]
-    
-    async def is_connected(self, user_id: int) -> bool:
-        """Проверить, подключен ли кошелек"""
-        connector = self.get_connector(user_id)
-        return connector.connected
 
 
 tonconnect_service = TONConnectService()

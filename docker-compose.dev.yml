@@ -16,6 +16,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
 
   redis:
     image: redis:7-alpine
@@ -28,6 +36,15 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: no
 
   api:
     build:
@@ -49,7 +66,7 @@ services:
       - PYTHONUNBUFFERED=1
       - RELOAD=true
       - JETTON_MASTER=0:c4d623eb3fcd0bd7b473907dd896e5ec11c9f98be6cf15fb9edb9f6e30a28513
-      - REQUESTS_PER_SECOND=1.0
+      - REQUESTS_PER_SECOND=10.0
       - WORKER_BATCH_SIZE=10
       - START_DATE=2025-10-28
       - TON_PROOF_DOMAIN=dev.durak.bot
@@ -61,7 +78,15 @@ services:
     volumes:
       - .:/app
       - /app/__pycache__
-    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    restart: no
 
   bot:
     build:
@@ -90,7 +115,15 @@ services:
     volumes:
       - .:/app
       - /app/__pycache__
-    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 256M
+    restart: no
 
   worker:
     build:
@@ -109,7 +142,7 @@ services:
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - JETTON_MASTER=0:c4d623eb3fcd0bd7b473907dd896e5ec11c9f98be6cf15fb9edb9f6e30a28513
-      - REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND:-1.0}
+      - REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND:-10.0}
       - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-10}
       - START_DATE=${START_DATE:-2025-10-28}
     depends_on:
@@ -120,7 +153,15 @@ services:
     volumes:
       - .:/app
       - /app/__pycache__
-    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    restart: no
 
 volumes:
   postgres_data:

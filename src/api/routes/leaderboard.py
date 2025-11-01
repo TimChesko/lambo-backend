@@ -51,7 +51,7 @@ async def get_leaderboard(
         
         if user_wallet:
             user_rank = get_rank(user_wallet.address)
-            user_volume = user_wallet.total_volume
+            user_volume = user_wallet.total_volume_usd
     
     return LeaderboardResponse(
         items=items,

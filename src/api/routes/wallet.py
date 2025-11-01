@@ -103,10 +103,8 @@ async def verify_wallet(
             user_id=user.id,
             address=address,
             label="TON Connect",
-            balance=0.0,
-            buy_volume=0.0,
-            sell_volume=0.0,
-            total_volume=0.0,
+            sync_status='pending',
+            initial_sync_completed=False,
             is_active=True
         )
         db.add(new_wallet)

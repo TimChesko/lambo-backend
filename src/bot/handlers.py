@@ -2,7 +2,7 @@ from aiogram import Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from src.database import async_session_maker
-from src.services.wallet_service import create_user
+from src.services.user_service import create_user
 
 
 async def cmd_start(message: Message):

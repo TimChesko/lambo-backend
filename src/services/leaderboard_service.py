@@ -78,7 +78,7 @@ async def rebuild_leaderboard_from_db(db: AsyncSession) -> Dict[str, int]:
         result = await db.execute(
             select(Wallet)
             .where(Wallet.is_active == True, Wallet.user_id.isnot(None))
-            .order_by(Wallet.total_volume.desc())
+            .order_by(Wallet.total_volume_usd.desc())
         )
         wallets = result.scalars().all()
         
@@ -87,8 +87,8 @@ async def rebuild_leaderboard_from_db(db: AsyncSession) -> Dict[str, int]:
             return {"rebuilt": 0, "total": 0}
         
         for wallet in wallets:
-            volume = wallet.total_volume or 0.0
-            _redis_client.zadd(LEADERBOARD_KEY, {wallet.address: volume})
+            volume_usd = wallet.total_volume_usd or 0.0
+            _redis_client.zadd(LEADERBOARD_KEY, {wallet.address: volume_usd})
         
         logger.info(f"✅ Rebuilt leaderboard from DB: {len(wallets)} wallets")
         return {

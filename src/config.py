@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         env="LAMBO_POOL_ADDRESS"
     )
     
-    requests_per_second: float = Field(default=1.0, env="REQUESTS_PER_SECOND")
+    requests_per_second: float = Field(default=10.0, env="REQUESTS_PER_SECOND")
     worker_batch_size: int = Field(default=10, env="WORKER_BATCH_SIZE")
     start_date: str = Field(default="2025-10-28", env="START_DATE")
     

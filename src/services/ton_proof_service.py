@@ -33,27 +33,6 @@ def generate_payload(user_id: str, ttl: int = 300) -> str:
     return payload_hex
 
 
-def extract_public_key_from_state_init(state_init_boc: str) -> Optional[bytes]:
-    try:
-        state_init_bytes = base64.b64decode(state_init_boc)
-        cell = Cell.one_from_boc(state_init_bytes)
-        
-        if len(cell.refs) < 2:
-            logger.warning("State init must have at least 2 refs (code and data)")
-            return None
-        
-        data_cell = cell.refs[1]
-        data_slice = data_cell.begin_parse()
-        data_slice.load_uint(32)
-        public_key = data_slice.load_bytes(32)
-        
-        return public_key
-        
-    except Exception as e:
-        logger.error(f"Error extracting public key from state_init: {e}")
-        return None
-
-
 def check_proof(
     address: str,
     proof: Dict[str, Any],
