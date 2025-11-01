@@ -9,6 +9,9 @@ from src.config import settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Отключаем логи httpx
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 class TransactionProcessor:
     def __init__(self):
         self.api_url = settings.ton_api_url
@@ -54,10 +57,48 @@ class TransactionProcessor:
         return closest_point[1]
     
     def find_swap_action(self, event_data: dict) -> dict:
-        for action in event_data.get("actions", []):
-            if action.get("type") == "JettonSwap":
-                return action.get("JettonSwap", {})
-        return {}
+        """
+        Извлекает информацию о свопе из Events API.
+        Ищет JettonSwap в actions[].
+        """
+        try:
+            actions = event_data.get("actions", [])
+            
+            for action in actions:
+                if action.get("type") != "JettonSwap":
+                    continue
+                
+                swap = action.get("JettonSwap", {})
+                if not swap:
+                    continue
+                
+                # Извлекаем данные
+                ton_in = swap.get("ton_in", 0)
+                ton_out = swap.get("ton_out", 0)
+                amount_in = swap.get("amount_in", "0")
+                amount_out = swap.get("amount_out", "0")
+                
+                user_wallet = swap.get("user_wallet", {})
+                jetton_master_in = swap.get("jetton_master_in", {})
+                jetton_master_out = swap.get("jetton_master_out", {})
+                
+                return {
+                    "ton_in": ton_in,
+                    "ton_out": ton_out,
+                    "amount_in": amount_in,
+                    "amount_out": amount_out,
+                    "user_wallet": user_wallet,
+                    "jetton_master_in": jetton_master_in,
+                    "jetton_master_out": jetton_master_out,
+                }
+            
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Error in find_swap_action: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {}
     
     async def is_lambo_transaction(self, tx_hash: str, jetton_master: str) -> bool:
         """Проверяет является ли транзакция LAMBO swap'ом"""
@@ -88,7 +129,6 @@ class TransactionProcessor:
             pool = pool_result.scalar_one_or_none()
             
             if not pool or not pool.jetton_master:
-                logger.warning(f"Pool not found or jetton_master missing for tx {tx.tx_hash}, deleting")
                 await db.delete(tx)
                 await db.commit()
                 return False
@@ -97,7 +137,6 @@ class TransactionProcessor:
             
             swap_action = self.find_swap_action(event_data)
             if not swap_action:
-                logger.debug(f"Delete tx {tx.tx_hash[:8]}... - no JettonSwap action")
                 await db.delete(tx)
                 await db.commit()
                 return False
@@ -109,10 +148,27 @@ class TransactionProcessor:
             jetton_out_address = jetton_out.get("address") if isinstance(jetton_out, dict) else None
             
             if pool.jetton_master not in [jetton_in_address, jetton_out_address]:
-                logger.debug(f"Delete tx {tx.tx_hash[:8]}... - not LAMBO jetton")
                 await db.delete(tx)
                 await db.commit()
                 return False
+            
+            logger.info(f"💰 LAMBO swap found: {tx.tx_hash[:8]}...")
+            
+            # Это ЛАМБО транзакция!
+            event_id = event_data.get("event_id")
+            
+            # Проверяем дубликат по event_id
+            if event_id:
+                existing_event = await db.execute(
+                    select(Transaction).where(
+                        Transaction.event_id == event_id,
+                        Transaction.is_processed == True
+                    )
+                )
+                if existing_event.scalar_one_or_none():
+                    await db.delete(tx)
+                    await db.commit()
+                    return False
             
             event_timestamp = event_data.get("timestamp")
             if not event_timestamp:
@@ -123,17 +179,29 @@ class TransactionProcessor:
             
             ton_usd_price = await self.get_ton_price_at_time(event_timestamp)
             
-            ton_in_nano = swap_action.get("ton_in")
-            lambo_out_nano_str = swap_action.get("amount_out")
+            # Определяем тип операции: BUY или SELL
+            ton_in_nano = swap_action.get("ton_in", 0)
+            ton_out_nano = swap_action.get("ton_out", 0)
+            amount_in_str = swap_action.get("amount_in", "")
+            amount_out_str = swap_action.get("amount_out", "")
             
-            if ton_in_nano is None or lambo_out_nano_str is None:
-                logger.warning(f"Missing swap amounts for tx {tx.tx_hash}, deleting")
+            # BUY: TON входит, LAMBO выходит (ton_in > 0, amount_out > 0)
+            # SELL: LAMBO входит, TON выходит (amount_in > 0, ton_out > 0)
+            
+            if ton_in_nano and ton_in_nano > 0 and amount_out_str and amount_out_str != "":
+                # BUY транзакция
+                operation_type = "buy"
+                ton_amount = float(ton_in_nano) / 1_000_000_000
+                lambo_amount = float(amount_out_str) / 1_000_000_000
+            elif ton_out_nano and ton_out_nano > 0 and amount_in_str and amount_in_str != "":
+                # SELL транзакция
+                operation_type = "sell"
+                ton_amount = float(ton_out_nano) / 1_000_000_000
+                lambo_amount = float(amount_in_str) / 1_000_000_000
+            else:
                 await db.delete(tx)
                 await db.commit()
                 return False
-            
-            ton_amount = float(ton_in_nano) / 1_000_000_000
-            lambo_amount = float(lambo_out_nano_str) / 1_000_000_000
             
             user_wallet = swap_action.get("user_wallet", {})
             user_address = user_wallet.get("address") if isinstance(user_wallet, dict) else None
@@ -145,11 +213,28 @@ class TransactionProcessor:
                 return False
             
             tx.user_address = user_address
-            tx.operation_type = "buy"
+            tx.event_id = event_id
+            tx.operation_type = operation_type
             tx.ton_amount = ton_amount
             tx.lambo_amount = lambo_amount
             tx.ton_usd_price = ton_usd_price
             tx.timestamp = event_timestamp
+            
+            # Проверяем дубликат по комбинации (user + amount + timestamp)
+            existing_similar = await db.execute(
+                select(Transaction).where(
+                    Transaction.user_address == user_address,
+                    Transaction.ton_amount == ton_amount,
+                    Transaction.lambo_amount == lambo_amount,
+                    Transaction.timestamp == event_timestamp,
+                    Transaction.is_processed == True
+                )
+            )
+            if existing_similar.scalar_one_or_none():
+                await db.delete(tx)
+                await db.commit()
+                return False
+            
             tx.is_processed = True
             
             await db.commit()
@@ -157,7 +242,7 @@ class TransactionProcessor:
             await self.update_wallet_volumes(user_address, tx, db)
             
             logger.info(
-                f"✅ Processed {tx.tx_hash[:8]}... "
+                f"✅ Processed {operation_type.upper()} {tx.tx_hash[:8]}... "
                 f"User: {user_address[:8]}... "
                 f"TON: {ton_amount:.4f} "
                 f"LAMBO: {lambo_amount:.2f} "
@@ -177,7 +262,6 @@ class TransactionProcessor:
         wallet = result.scalar_one_or_none()
         
         if not wallet:
-            logger.warning(f"Wallet {address} not found, skipping volume update")
             return
         
         usd_amount = tx.ton_amount * tx.ton_usd_price

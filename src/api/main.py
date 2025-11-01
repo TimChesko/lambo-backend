@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from src.api.routes import auth, portfolio, leaderboard, wallet
+from src.api.routes import auth, portfolio, leaderboard, wallet, webhooks
 from src.config import settings
 import logging
 
@@ -36,6 +36,7 @@ app.include_router(auth.router, prefix="/v1/auth", tags=["auth"])
 app.include_router(wallet.router, prefix="/v1/wallet", tags=["wallet"])
 app.include_router(portfolio.router, prefix="/v1/portfolio", tags=["portfolio"])
 app.include_router(leaderboard.router, prefix="/v1/leaderboard", tags=["leaderboard"])
+app.include_router(webhooks.router, prefix="/webhook", tags=["webhooks"])
 
 
 @app.get("/")

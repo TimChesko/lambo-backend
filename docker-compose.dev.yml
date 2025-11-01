@@ -106,7 +106,7 @@ services:
       - PYTHONUNBUFFERED=1
       - JETTON_MASTER=0:c4d623eb3fcd0bd7b473907dd896e5ec11c9f98be6cf15fb9edb9f6e30a28513
       - REQUESTS_PER_SECOND=1.0
-      - START_DATE=2025-10-28
+      - START_DATE=2025-11-01
     depends_on:
       postgres:
         condition: service_healthy

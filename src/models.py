@@ -60,6 +60,7 @@ class Transaction(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     tx_hash = Column(String, unique=True, nullable=False, index=True)
+    event_id = Column(String, nullable=True, index=True)  # Для дедупликации событий
     lt = Column(String, nullable=False)
     timestamp = Column(Integer, nullable=False, index=True)
     

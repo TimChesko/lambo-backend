@@ -7,7 +7,6 @@ from src.database import async_session_maker, init_db
 from src.models import Pool, Transaction, Wallet
 from src.config import settings
 from src.worker.transactions import TransactionProcessor
-from src.worker.sse import SSEMonitor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,6 +20,7 @@ class JettonTracker:
         self.batch_size = settings.worker_batch_size
         self.processor = TransactionProcessor()
         self.sse_monitors = []
+        self.processing_lock = asyncio.Lock()  # 🔒 Только одна обработка за раз
     
     async def start(self):
         logger.info(f"🚀 Starting Jetton Tracker...")
@@ -29,7 +29,6 @@ class JettonTracker:
         
         await init_db()
         await self.ensure_leaderboard_ready()
-        await self.start_sse_monitors()
         await self.initial_pool_sync()
         
         self.is_running = True
@@ -55,23 +54,6 @@ class JettonTracker:
             monitor.stop()
         
         await self.processor.close()
-    
-    async def start_sse_monitors(self):
-        async with async_session_maker() as db:
-            result = await db.execute(
-                select(Pool).where(Pool.is_active == True)
-            )
-            pools = result.scalars().all()
-            
-            if not pools:
-                logger.warning("⚠️  No active pools found!")
-                return
-            
-            for pool in pools:
-                monitor = SSEMonitor(pool)
-                self.sse_monitors.append(monitor)
-                asyncio.create_task(monitor.start())
-                logger.info(f"Started SSE monitor for pool: {pool.name or pool.address[:8]}")
     
     async def initial_pool_sync(self):
         logger.info("🔄 Starting initial pool sync...")
@@ -106,112 +88,72 @@ class JettonTracker:
                 
                 try:
                     added = 0
-                    skipped = 0
-                    logger.info(f"🔍 Filtering {len(all_txs)} transactions with parallel batch processing...")
+                    logger.info(f"💾 Adding {len(all_txs)} transactions to database...")
                     
                     # Преобразуем last_processed_lt в число для сравнения
                     stop_at_lt = int(pool.last_processed_lt) if pool.last_processed_lt else 0
                     if stop_at_lt > 0:
-                        logger.info(f"⛔ Will stop processing at LT {stop_at_lt} (previously synced)")
+                        logger.info(f"⛔ Will skip transactions already processed (LT <= {stop_at_lt})")
                     
-                    max_added_lt = 0  # Отслеживаем максимальный LT только для ДОБАВЛЕННЫХ транзакций
-                    
-                    # Используем семафор для ограничения одновременных запросов согласно RPS
-                    max_concurrent_checks = 2  # Максимум 2 одновременно для безопасности от 429
-                    filter_semaphore = asyncio.Semaphore(max_concurrent_checks)
-                    logger.info(f"⏱️  Using {max_concurrent_checks} concurrent checks for LAMBO verification")
-                    
-                    async def check_lambo_with_limit(tx_hash, jetton_master):
-                        """Проверяет LAMBO с ограничением по семафору"""
-                        async with filter_semaphore:
-                            return await self.processor.is_lambo_transaction(tx_hash, jetton_master)
-                    
-                    filter_batch_size = max_concurrent_checks * 2  # Динамический размер батча
-                    
-                    # Разбиваем на батчи для параллельной обработки
-                    for batch_idx in range(0, len(all_txs), filter_batch_size):
-                        batch = all_txs[batch_idx:batch_idx + filter_batch_size]
-                        batch_progress = min(batch_idx + filter_batch_size, len(all_txs))
+                    # Просто добавляем ВСЕ TX, не проверяя LAMBO
+                    # LAMBO проверка будет позже в process_pending_transactions()
+                    for tx_data in all_txs:
+                        tx_lt = int(tx_data["lt"])
                         
-                        if batch_progress % 100 == 0 or batch_progress == len(all_txs):
-                            logger.info(f"   Progress: {batch_progress}/{len(all_txs)}, added: {added}, skipped: {skipped}")
+                        # Если встретили ранее обработанный LT, выходим из цикла
+                        # (TX отсортирован от новых к старым, так что все следующие будут старше)
+                        if stop_at_lt > 0 and tx_lt <= stop_at_lt:
+                            logger.info(f"⛔ Reached previously processed LT {tx_lt}, stopping (checkpoint was {stop_at_lt})")
+                            break
                         
-                        # Подготавливаем список задач для параллельной проверки
-                        check_tasks = []
-                        for tx_data in batch:
-                            tx_lt = int(tx_data["lt"])
-                            
-                            # Если встретили ранее обработанный LT, останавливаемся
-                            if stop_at_lt > 0 and tx_lt <= stop_at_lt:
-                                logger.info(f"⛔ Reached previously synced LT {tx_lt}, stopping batch processing")
-                                break
-                            
-                            # Проверяем дубликат в БД
-                            existing = await db.execute(
-                                select(Transaction).where(Transaction.tx_hash == tx_data["hash"])
-                            )
-                            if not existing.scalar_one_or_none():
-                                # Параллельно проверяем что это LAMBO транзакция (с ограничением)
-                                check_tasks.append((tx_data, check_lambo_with_limit(tx_data["hash"], pool.jetton_master)))
+                        # Проверяем дубликат в БД
+                        existing = await db.execute(
+                            select(Transaction).where(Transaction.tx_hash == tx_data["hash"])
+                        )
+                        if existing.scalar_one_or_none():
+                            logger.debug(f"   Skipping duplicate TX {tx_data['hash']}")
+                            continue
                         
-                        # Если встретили ранее обработанный LT, выходим из основного цикла
-                        if check_tasks and batch and int(batch[-1]["lt"]) <= stop_at_lt:
-                            logger.info(f"📍 Batch contains previously synced data, finishing...")
+                        # Добавляем TX без фильтрации - процессор проверит LAMBO позже
+                        tx = Transaction(
+                            tx_hash=tx_data["hash"],
+                            lt=str(tx_data["lt"]),
+                            timestamp=tx_data["utime"],
+                            pool_id=pool.id,
+                            is_processed=False
+                        )
+                        db.add(tx)
+                        added += 1
                         
-                        # Ждем результаты всех проверок параллельно
-                        if check_tasks:
-                            results = await asyncio.gather(*[task for _, task in check_tasks], return_exceptions=True)
-                            
-                            for (tx_data, _), is_lambo_result in zip(check_tasks, results):
-                                if isinstance(is_lambo_result, Exception):
-                                    logger.error(f"Error checking tx {tx_data['hash']}: {is_lambo_result}")
-                                    skipped += 1
-                                    continue
-                                
-                                if not is_lambo_result:
-                                    skipped += 1
-                                    continue
-                                
-                                tx = Transaction(
-                                    tx_hash=tx_data["hash"],
-                                    lt=str(tx_data["lt"]),
-                                    timestamp=tx_data["utime"],
-                                    pool_id=pool.id,
-                                    is_processed=False
-                                )
-                                db.add(tx)
-                                added += 1
-                                max_added_lt = max(max_added_lt, int(tx_data["lt"]))
-                        
-                        # Commit каждые 50 добавленных транзакций
-                        if added % 50 == 0:
+                        # Commit каждые 100 транзакций
+                        if added % 100 == 0:
                             await db.commit()
-                            # Сохраняем промежуточный LT чтобы знать где остановились
-                            if max_added_lt > stop_at_lt:
-                                pool.last_processed_lt = str(max_added_lt)
+                            logger.info(f"   Progress: {added} transactions added")
+                    
+                    # Финальный commit
+                    await db.commit()
+                    logger.info(f"📊 Added: {added} new transactions to process later (out of {len(all_txs)} fetched)")
+                    
+                    # Обновляем last_processed_lt - используем последний LT из загруженных
+                    if all_txs:
+                        if stop_at_lt > 0:
+                            # Берем максимальный LT из транзакций ВЫШе checkpoint
+                            new_txs = [int(tx["lt"]) for tx in all_txs if int(tx["lt"]) > stop_at_lt]
+                            if new_txs:
+                                latest_lt = max(new_txs)
+                                pool.last_processed_lt = str(latest_lt)
                                 pool.last_sync_timestamp = int(datetime.utcnow().timestamp())
                                 await db.commit()
-                                logger.info(f"💾 Intermediate checkpoint: saved LT {max_added_lt} after {added} transactions")
-                                max_added_lt = 0  # Сбрасываем для следующего батча
-                    
-                    await db.commit()
-                    logger.info(f"📊 Filtered: added {added} LAMBO txs, skipped {skipped} non-LAMBO")
-                    
-                    # Обновляем last_processed_lt только если добавили новые транзакции
-                    # или если это первая синхронизация
-                    if added > 0 and all_txs:
-                        # Находим максимальный LT среди новых добавленных (не всех загруженных)
-                        # Используем LT первой транзакции которая была добавлена
-                        latest_lt = max(int(tx["lt"]) for tx in all_txs if int(tx["lt"]) > stop_at_lt)
-                        pool.last_processed_lt = str(latest_lt)
-                        pool.last_sync_timestamp = int(datetime.utcnow().timestamp())
-                        await db.commit()
-                        logger.info(f"✅ Pool {pool.name}: synced to LT {latest_lt}, added {added} new transactions")
-                    elif stop_at_lt > 0:
-                        # Уже были обработаны ранее
-                        logger.info(f"✅ Pool {pool.name}: no new transactions (already synced up to LT {stop_at_lt})")
-                    else:
-                        logger.info(f"✅ Pool {pool.name}: no new transactions")
+                                logger.info(f"✅ Pool {pool.name}: checkpoint updated to LT {latest_lt}")
+                            else:
+                                logger.info(f"⏭️  No new transactions above checkpoint, keeping LT {stop_at_lt}")
+                        else:
+                            # Первый запуск - берем максимальный LT из всех
+                            latest_lt = max(int(tx["lt"]) for tx in all_txs)
+                            pool.last_processed_lt = str(latest_lt)
+                            pool.last_sync_timestamp = int(datetime.utcnow().timestamp())
+                            await db.commit()
+                            logger.info(f"✅ Pool {pool.name}: checkpoint saved to LT {latest_lt}")
                     
                     pool_sync_time = asyncio.get_event_loop().time() - pool_sync_start
                     logger.info(f"⏱️  Pool sync time: {pool_sync_time:.2f}s")
@@ -223,15 +165,27 @@ class JettonTracker:
         logger.info(f"✅ Initial pool sync complete (total time: {total_sync_time:.2f}s)")
     
     async def fetch_pool_transactions(self, pool_address: str, start_timestamp: int = None, after_lt: str = None) -> list:
+        """
+        ИСПРАВЛЕННАЯ версия: используем КОНВЕЙЕР (pipeline) вместо параллельных запросов с одной LT
+        
+        Вместо отправки 10 одинаковых запросов с одной before_lt:
+        - Каждый запрос использует LT из результата предыдущего
+        - Минимальная задержка между запросами
+        - Оптимальный RPS контроль
+        
+        ВАЖНО: Когда after_lt указан (не первый запуск):
+        - Первый запрос БЕЗ before_lt (получим самые новые!)
+        - Проверим есть ли там транзакции выше checkpoint
+        - Потом ищем дальше вниз с before_lt если нужно
+        """
         url = f"{settings.ton_api_url}/v2/blockchain/accounts/{pool_address}/transactions"
         all_transactions = []
-        max_concurrent_requests = 10  # Отправляем до 10 запросов одновременно
-        target_rps = settings.requests_per_second  # Целевой RPS (10)
+        target_rps = settings.requests_per_second
         
         if after_lt:
             logger.info(f"Fetching new transactions after LT {after_lt}")
         
-        logger.info(f"🚀 Starting parallel fetch - Target: {target_rps} RPS, Initial concurrent: {max_concurrent_requests}")
+        logger.info(f"🚀 Starting pipeline fetch - Target: {target_rps} RPS")
         
         async def fetch_page(client, before_lt=None):
             """Загружает одну страницу транзакций"""
@@ -255,121 +209,83 @@ class JettonTracker:
             timeout=30.0,
             headers={'Authorization': f'Bearer {settings.ton_api_key}'}
         ) as client:
-            semaphore = asyncio.Semaphore(max_concurrent_requests)
-            
-            async def fetch_with_semaphore(before_lt=None):
-                async with semaphore:
-                    return await fetch_page(client, before_lt)
-            
-            # Начинаем с первого запроса
-            first_result = await fetch_page(client, after_lt)
-            if isinstance(first_result, tuple):
-                first_page, _ = first_result
-            else:
-                first_page = first_result
-                
-            if not first_page:
-                logger.info("No transactions found")
-                return []
-            
-            all_transactions.extend(first_page)
-            
-            # Если вернулось меньше limit, это последняя страница
-            if len(first_page) < 1000:
-                logger.info("First page has less than limit, no more pages")
-                return all_transactions
-            
-            # Подготавливаем список задач для параллельной загрузки
-            current_before_lt = str(first_page[-1]["lt"])
-            
             fetch_start = asyncio.get_event_loop().time()
-            total_requests = 1  # Первый запрос уже был
-            batch_count = 0
+            total_requests = 0
             request_times = []
             
-            # Загружаем страницы параллельно, проверяя условия
+            # КОНВЕЙЕР: каждый запрос использует LT из результата предыдущего
+            current_before_lt = None  # Начинаем БЕЗ before_lt, даже если after_lt есть!
+            first_page = True
+            
             while True:
-                batch_count += 1
-                batch_start = asyncio.get_event_loop().time()
+                # Получаем одну страницу
+                page, req_time = await fetch_page(client, current_before_lt)
+                total_requests += 1
+                request_times.append(req_time)
                 
-                # Создаем батч из max_concurrent_requests задач
-                batch = []
-                for _ in range(max_concurrent_requests):
-                    task = asyncio.create_task(fetch_with_semaphore(current_before_lt))
-                    batch.append(task)
-                
-                # Ждем результатов батча
-                results = await asyncio.gather(*batch, return_exceptions=True)
-                batch_time = asyncio.get_event_loop().time() - batch_start
-                
-                # Подсчитываем успешные запросы и время
-                successful_requests = 0
-                batch_requests_time = []
-                for result in results:
-                    if isinstance(result, tuple) and len(result) == 2:
-                        transactions, req_time = result
-                        if transactions:  # Успешный запрос
-                            successful_requests += 1
-                            batch_requests_time.append(req_time)
-                            request_times.append(req_time)
-                    elif isinstance(result, Exception):
-                        logger.error(f"Task error: {result}")
-                
-                total_requests += successful_requests
-                
-                # Вычисляем текущий RPS за этот батч
-                current_rps = successful_requests / max(batch_time, 0.1)
-                
-                # Адаптивное увеличение: если RPS < целевого, пробуем увеличить параллелизм
-                if current_rps < target_rps * 0.9 and max_concurrent_requests < 30:
-                    old_max = max_concurrent_requests
-                    max_concurrent_requests = min(max_concurrent_requests + 3, 30)
-                    logger.info(f"⚡ Increasing concurrent requests: {old_max} → {max_concurrent_requests} (current RPS: {current_rps:.1f})")
-                elif current_rps > target_rps * 1.1 and max_concurrent_requests > 5:
-                    old_max = max_concurrent_requests
-                    max_concurrent_requests = max(max_concurrent_requests - 2, 5)
-                    logger.info(f"⬇️  Decreasing concurrent requests: {old_max} → {max_concurrent_requests} (current RPS: {current_rps:.1f})")
-                
-                batch_has_data = False
-                for result in results:
-                    if isinstance(result, tuple):
-                        transactions, _ = result
-                        if transactions:
-                            all_transactions.extend(transactions)
-                            batch_has_data = True
-                            
-                            # Обновляем before_lt для следующего запроса
-                            if len(transactions) >= 1000:
-                                current_before_lt = str(transactions[-1]["lt"])
-                            else:
-                                # Если в этом батче была последняя страница, выходим
-                                logger.info(f"Reached last page in batch, total: {len(all_transactions)}")
-                                fetch_time = asyncio.get_event_loop().time() - fetch_start
-                                actual_rps = total_requests / max(fetch_time, 0.1)
-                                logger.info(f"📊 Parallel fetch complete: {len(all_transactions)} tx from {total_requests} requests in {fetch_time:.2f}s (avg RPS: {actual_rps:.1f})")
-                                return all_transactions
-                    elif isinstance(result, Exception):
-                        logger.error(f"Task error: {result}")
-                
-                if not batch_has_data:
-                    logger.info(f"No more data in batch, total: {len(all_transactions)}")
+                if not page:
+                    logger.info(f"No more transactions, total: {len(all_transactions)}")
                     break
                 
-                # Проверяем условие start_timestamp если указан
-                if not after_lt and start_timestamp and all_transactions:
-                    last_tx_time = int(all_transactions[-1]["utime"])
+                all_transactions.extend(page)
+                logger.info(f"Fetched {len(page)} transactions (total: {len(all_transactions)}), LT range: {page[0]['lt']} -> {page[-1]['lt']}")
+                
+                # На первой странице проверяем если это не первый запуск
+                if first_page and after_lt:
+                    first_page = False
+                    max_lt_in_page = int(page[0]["lt"])
+                    if max_lt_in_page <= int(after_lt):
+                        logger.info(f"✅ Max LT in first page {max_lt_in_page} <= checkpoint {after_lt}, no new transactions")
+                        break
+                    else:
+                        logger.info(f"📈 Found newer transactions! Max LT: {max_lt_in_page} > checkpoint {after_lt}")
+                
+                first_page = False
+                
+                # Условия остановки
+                if len(page) < 1000:
+                    logger.info(f"Reached last page (only {len(page)} transactions), stopping")
+                    break
+                
+                # ВАЖНО: если это не первый запуск (after_lt указан), проверяем что дошли до checkpoint
+                if after_lt and page:
+                    min_lt_in_page = int(page[-1]["lt"])  # самый старый LT на этой странице
+                    if min_lt_in_page <= int(after_lt):
+                        logger.info(f"✅ Reached checkpoint LT {after_lt}, stopping (min LT in page: {min_lt_in_page})")
+                        break
+                
+                if not after_lt and start_timestamp and page:
+                    last_tx_time = int(page[-1]["utime"])
                     if last_tx_time <= start_timestamp:
                         logger.info(f"Reached start_timestamp {start_timestamp}, stopping")
                         break
+                
+                # Обновляем before_lt для СЛЕДУЮЩЕГО запроса
+                current_before_lt = str(page[-1]["lt"])
+                
+                # Контролируем RPS: если нужно, добавляем задержку
+                if total_requests > 0:
+                    elapsed = asyncio.get_event_loop().time() - fetch_start
+                    current_rps = total_requests / max(elapsed, 0.1)
+                    if current_rps > target_rps:
+                        delay = (total_requests - 1) / target_rps - elapsed
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                            logger.debug(f"RPS throttle: {current_rps:.1f} → sleeping {delay:.3f}s")
         
         fetch_time = asyncio.get_event_loop().time() - fetch_start
         actual_rps = total_requests / max(fetch_time, 0.1)
-        logger.info(f"📊 Parallel fetch complete: {len(all_transactions)} tx from {total_requests} requests in {fetch_time:.2f}s (avg RPS: {actual_rps:.1f})")
+        avg_req_time = sum(request_times) / len(request_times) if request_times else 0
         
-        # Фильтруем транзакции по start_timestamp (только если after_lt не указан)
+        logger.info(f"📊 Pipeline fetch complete: {len(all_transactions)} tx from {total_requests} requests in {fetch_time:.2f}s")
+        logger.info(f"   Avg RPS: {actual_rps:.1f}, Avg req time: {avg_req_time:.3f}s")
+        
+        # Финальная фильтрация по timestamp (только если after_lt не указан)
         if not after_lt and start_timestamp:
+            before_filter = len(all_transactions)
             all_transactions = [tx for tx in all_transactions if int(tx["utime"]) >= start_timestamp]
-            logger.info(f"After filtering by timestamp: {len(all_transactions)} transactions")
+            filtered_out = before_filter - len(all_transactions)
+            logger.info(f"After filtering by timestamp: {len(all_transactions)} transactions (removed {filtered_out})")
         
         return all_transactions
     
@@ -404,7 +320,8 @@ class JettonTracker:
                     )
                     .where(
                         Transaction.user_address == wallet.address,
-                        Transaction.is_processed == True
+                        Transaction.is_processed == True,
+                        Transaction.timestamp >= wallet.created_at
                     )
                 )
                 
@@ -437,37 +354,33 @@ class JettonTracker:
             return len(wallets)
     
     async def process_pending_transactions(self) -> int:
-        async with async_session_maker() as db:
-            result = await db.execute(
-                select(Transaction)
-                .where(Transaction.is_processed == False)
-                .order_by(Transaction.timestamp.asc())
-                .limit(self.batch_size)
-            )
-            transactions = result.scalars().all()
-            
-            if not transactions:
-                return 0
-            
-            logger.info(f"🔧 Processing {len(transactions)} pending transactions...")
-            
-            processed_count = 0
-            for tx in transactions:
-                try:
-                    success = await self.processor.process_transaction(tx, db)
-                    if success:
-                        processed_count += 1
-                    
-                    await asyncio.sleep(self.delay)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing tx {tx.tx_hash}: {e}")
-                    await asyncio.sleep(self.delay)
-            
-            if processed_count > 0:
-                logger.info(f"✅ Successfully processed {processed_count}/{len(transactions)} transactions")
-            
-            return len(transactions)
+        async with self.processing_lock:
+            async with async_session_maker() as db:
+                result = await db.execute(
+                    select(Transaction)
+                    .where(Transaction.is_processed == False)
+                    .order_by(Transaction.timestamp.asc())
+                    .limit(self.batch_size)
+                )
+                transactions = result.scalars().all()
+                
+                if not transactions:
+                    return 0
+                
+                processed_count = 0
+                for tx in transactions:
+                    try:
+                        success = await self.processor.process_transaction(tx, db)
+                        if success:
+                            processed_count += 1
+                        
+                        await asyncio.sleep(self.delay)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing tx {tx.tx_hash}: {e}")
+                        await asyncio.sleep(self.delay)
+                
+                return len(transactions)
     
     async def ensure_leaderboard_ready(self):
         try:
